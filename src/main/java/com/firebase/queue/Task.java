@@ -15,6 +15,7 @@ import java.lang.ref.WeakReference;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class Task {
   public interface Listener {
@@ -23,20 +24,20 @@ public class Task {
     /**
      * The task action failed
      * @param error a human readable description of what went wrong
-     * @param canRetry whether or not the action can be retried. If it is {@code false}, the {@link TaskProcessor#process(Task)} should be exited as soon as possible
+     * @param canRetry whether or not the action can be retried. If it is {@code false}, {@link TaskProcessor#process(Task)} should be exited as soon as possible
      */
     void onFailure(@NotNull String error, boolean canRetry);
   }
 
-  public static final String STATE_KEY = "_state";
-  public static final String STATE_CHANGED_KEY = "_state_changed";
-  public static final String OWNER_KEY = "_owner";
-  public static final String ERROR_DETAILS_KEY = "_error_details";
-  public static final String ERROR_DETAILS_ATTEMPTS_KEY = "attempts";
-  public static final String ERROR_DETAILS_PREVIOUS_STATE_KEY = "previous_state";
-  public static final String ERROR_KEY = "error";
-  public static final String ERROR_STACK_KEY = "error_stack";
-  public static final String ORIGINAL_TASK_KEY = "original_task";
+  static final String STATE_KEY = "_state";
+  static final String STATE_CHANGED_KEY = "_state_changed";
+  static final String OWNER_KEY = "_owner";
+  static final String ERROR_DETAILS_KEY = "_error_details";
+  static final String ERROR_DETAILS_ATTEMPTS_KEY = "attempts";
+  static final String ERROR_DETAILS_PREVIOUS_STATE_KEY = "previous_state";
+  static final String ERROR_KEY = "error";
+  static final String ERROR_STACK_KEY = "error_stack";
+  static final String ORIGINAL_TASK_KEY = "original_task";
 
   private static final String ACTION_RESOLVED = "resolve";
   private static final String ACTION_REJECTED = "reject";
@@ -49,8 +50,8 @@ public class Task {
   private final ValidityChecker validityChecker;
   private final boolean suppressStack;
 
-  private boolean processing;
-  private CountDownLatch completionLatch;
+  private final AtomicBoolean processing = new AtomicBoolean();
+  private final CountDownLatch completionLatch = new CountDownLatch(1);
 
   private final Object actionLock = new Object();
 
@@ -63,7 +64,8 @@ public class Task {
   // this is true if we no longer own the task, or can't take any other action on this task
   private volatile boolean cancelled;
 
-  public Task(@NotNull Firebase taskRef, @NotNull String ownerId, @NotNull Map<String, Object> data, @NotNull TaskSpec taskSpec, @NotNull TaskReset taskReset, @NotNull ValidityChecker validityChecker, boolean suppressStack) {
+  public Task(@NotNull Firebase taskRef, @NotNull String ownerId, @NotNull Map<String, Object> data, @NotNull TaskSpec taskSpec,
+              @NotNull TaskReset taskReset, @NotNull ValidityChecker validityChecker, boolean suppressStack) {
     this.taskRef = taskRef;
     this.ownerId = ownerId;
     this.data = data;
@@ -73,51 +75,50 @@ public class Task {
     this.suppressStack = suppressStack;
   }
 
-  /*package*/ void process(TaskProcessor taskProcessor) {
-    if(processing) {
+  void process(TaskProcessor taskProcessor) {
+    if(processing.getAndSet(true)) {
       throw new IllegalStateException("Cannot process a task more than once");
     }
 
-    processing = true;
-
-    if(Thread.currentThread().isInterrupted()) {
-      interrupted = true;
-      return;
-    }
-
-    processingThreadRef = new WeakReference<Thread>(Thread.currentThread());
-
-    completionLatch = new CountDownLatch(1);
-
     try {
-      taskProcessor.process(this);
-
       if(Thread.currentThread().isInterrupted()) {
+        interrupted = true;
+        return;
+      }
+
+      processingThreadRef = new WeakReference<Thread>(Thread.currentThread());
+
+      try {
+        taskProcessor.process(this);
+
+        if(Thread.currentThread().isInterrupted()) {
+          synchronized (actionLock) {
+            if(canTakeAction()) {
+              interrupted = true;
+
+              completionLatch.countDown();
+            }
+          }
+        }
+
+        completionLatch.await();
+      }
+      catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+
         synchronized (actionLock) {
           if(canTakeAction()) {
             interrupted = true;
 
             completionLatch.countDown();
-
-            return;
           }
         }
       }
-
-      completionLatch.await();
     }
-    catch (InterruptedException e) {
-      synchronized (actionLock) {
-        if(canTakeAction()) {
-          interrupted = true;
-
-          completionLatch.countDown();
-        }
+    finally {
+      if(interrupted) {
+        taskReset.reset(taskRef, taskSpec.getInProgressState());
       }
-    }
-
-    if(interrupted) {
-      taskReset.reset(taskRef, taskSpec.getInProgressState());
     }
   }
 
@@ -166,6 +167,8 @@ public class Task {
             if(!canRetry) {
               cancel();
             }
+
+            aborted = false;
 
             if(listener != null) listener.onFailure(error, canRetry);
           }
@@ -225,7 +228,7 @@ public class Task {
         Object taskState = value.get(STATE_KEY);
         Object taskOwner = value.get(OWNER_KEY);
         boolean ownersMatch = ownerId.equals(taskOwner);
-        if((ourInProgressState == taskState || (ourInProgressState != null && ourInProgressState.equals(taskState))) && ownersMatch) {
+        if((ourInProgressState == taskState || (ourInProgressState.equals(taskState))) && ownersMatch) {
           if(taskSpec.getFinishedState() == null) {
             task.setValue(null);
             return Transaction.success(task);
@@ -261,11 +264,11 @@ public class Task {
         if(error != null) {
           final long incrementedRetries = retries + 1;
           if(incrementedRetries < Queue.MAX_TRANSACTION_RETRIES) {
-            Log.debug("Received onFailure while resolving task " + taskKey + " on " + ownerId + "...retrying", error);
+            Log.debug(error, "Received onFailure while resolving task " + taskKey + " on " + ownerId + "...retrying");
             resolve(newTask, listener, incrementedRetries);
           }
           else {
-            Log.debug("Can't resolve task " + taskKey + " on " + ownerId + " - transaction errored too many times, no longer retrying", error);
+            Log.debug(error, "Can't resolve task " + taskKey + " on " + ownerId + " - transaction errored too many times, no longer retrying");
             if(listener != null) listener.onFailure("Can't resolve task - transaction errored too many times, no longer retrying", true);
           }
         }
@@ -345,7 +348,7 @@ public class Task {
         Object taskState = value.get(STATE_KEY);
         Object taskOwner = value.get(OWNER_KEY);
         boolean ownersMatch = ownerId.equals(taskOwner);
-        if((ourInProgressState == taskState || (ourInProgressState != null && ourInProgressState.equals(taskState))) && ownersMatch) {
+        if((ourInProgressState == taskState || (ourInProgressState.equals(taskState))) && ownersMatch) {
           @SuppressWarnings("unchecked") Map<String, Object> errorDetails = (Map<String, Object>) value.get(ERROR_DETAILS_KEY);
           if(errorDetails == null) {
             errorDetails = new HashMap<String, Object>();
@@ -406,11 +409,11 @@ public class Task {
         if (error != null) {
           final long incrementedRetries = retries + 1;
           if (incrementedRetries < Queue.MAX_TRANSACTION_RETRIES) {
-            Log.debug("Received error while rejecting task " + taskKey + " on " + ownerId + "...retrying", error);
+            Log.debug(error, "Received error while rejecting task " + taskKey + " on " + ownerId + "...retrying");
             internalReject(errorObject, listener, incrementedRetries);
           }
           else {
-            Log.debug("Can't reject task " + taskKey + " on " + ownerId + " - transaction errored too many times, no longer retrying", error);
+            Log.debug(error, "Can't reject task " + taskKey + " on " + ownerId + " - transaction errored too many times, no longer retrying");
             if(listener != null) listener.onFailure("Can't reject task - transaction errored too many times, no longer retrying", true);
           }
         }

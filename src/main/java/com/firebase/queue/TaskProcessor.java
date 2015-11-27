@@ -1,5 +1,7 @@
 package com.firebase.queue;
 
+import org.jetbrains.annotations.NotNull;
+
 public interface TaskProcessor {
-  void process(Task task) throws InterruptedException;
+  void process(@NotNull Task task) throws InterruptedException;
 }

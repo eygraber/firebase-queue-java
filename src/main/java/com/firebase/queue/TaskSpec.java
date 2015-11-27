@@ -1,37 +1,40 @@
 package com.firebase.queue;
 
 import com.firebase.client.DataSnapshot;
+import org.jetbrains.annotations.NotNull;
 
 import java.util.concurrent.TimeUnit;
 
-/*package*/ class TaskSpec {
-  private static final String START_STATE = "start_state";
-  private static final String IN_PROGRESS_STATE = "in_progress_state";
-  private static final String FINISHED_STATE = "finished_state";
-  private static final String ERROR_STATE = "error_state";
-  private static final String TIMEOUT = "timeout";
-  private static final String RETRIES = "retries";
+class TaskSpec {
+  static final String START_STATE = "start_state";
+  static final String IN_PROGRESS_STATE = "in_progress_state";
+  static final String FINISHED_STATE = "finished_state";
+  static final String ERROR_STATE = "error_state";
+  static final String TIMEOUT = "timeout";
+  static final String RETRIES = "retries";
 
-  private static final String DEFAULT_IN_PROGRESS_STATE = "in_progress";
-  private static final String DEFAULT_ERROR_STATE = "error";
-  private static final long DEFAULT_TIMEOUT = TimeUnit.MILLISECONDS.convert(5, TimeUnit.MINUTES);
-  private static final long DEFAULT_RETRIES = 0;
+  static final String DEFAULT_IN_PROGRESS_STATE = "in_progress";
+  static final String DEFAULT_ERROR_STATE = "error";
+  static final long DEFAULT_TIMEOUT = TimeUnit.MILLISECONDS.convert(5, TimeUnit.MINUTES);
+  static final long DEFAULT_RETRIES = 0;
 
-  private String startState;
-  private String inProgressState;
-  private String finishedState;
-  private String errorState;
-  private long timeout;
-  private long retries;
+  private final String startState;
+  @NotNull private final String inProgressState;
+  private final String finishedState;
+  private final String errorState;
+  private final long timeout;
+  private final long retries;
 
-  public TaskSpec() {
+  TaskSpec() {
+    this.startState = null;
     this.inProgressState = DEFAULT_IN_PROGRESS_STATE;
+    this.finishedState = null;
     this.errorState = DEFAULT_ERROR_STATE;
     this.timeout = DEFAULT_TIMEOUT;
     this.retries = DEFAULT_RETRIES;
   }
 
-  public TaskSpec(DataSnapshot specSnapshot) {
+  TaskSpec(DataSnapshot specSnapshot) {
     Object startStateVal = specSnapshot.child(START_STATE).getValue();
     this.startState = startStateVal instanceof String ? ((String) startStateVal) : null;
 
@@ -44,36 +47,37 @@ import java.util.concurrent.TimeUnit;
     Object errorStateVal = specSnapshot.child(ERROR_STATE).getValue();
     this.errorState = errorStateVal instanceof String ? ((String) errorStateVal) : DEFAULT_ERROR_STATE;
 
-    this.timeout = firebaseValToLong(specSnapshot.child(TIMEOUT), DEFAULT_TIMEOUT);
+    this.timeout = firebaseValToLong(specSnapshot.child(TIMEOUT).getValue(), DEFAULT_TIMEOUT);
 
-    this.retries = firebaseValToLong(specSnapshot.child(RETRIES), DEFAULT_RETRIES);
+    this.retries = firebaseValToLong(specSnapshot.child(RETRIES).getValue(), DEFAULT_RETRIES);
   }
 
-  public String getStartState() {
+  String getStartState() {
     return startState;
   }
 
-  public String getInProgressState() {
+  @NotNull
+  String getInProgressState() {
     return inProgressState;
   }
 
-  public String getFinishedState() {
+  String getFinishedState() {
     return finishedState;
   }
 
-  public String getErrorState() {
+  String getErrorState() {
     return errorState;
   }
 
-  public long getTimeout() {
+  long getTimeout() {
     return timeout;
   }
 
-  public long getRetries() {
+  long getRetries() {
     return retries;
   }
 
-  public boolean validate() {
+  boolean validate() {
     if(startState != null && startState.equals(inProgressState)) {
       return false;
     }
@@ -125,5 +129,33 @@ import java.util.concurrent.TimeUnit;
     else {
       return defaultVal;
     }
+  }
+
+  @Override
+  public boolean equals(Object o) {
+    if (this == o) return true;
+    if (o == null || getClass() != o.getClass()) return false;
+
+    TaskSpec taskSpec = (TaskSpec) o;
+
+    if (timeout != taskSpec.timeout) return false;
+    if (retries != taskSpec.retries) return false;
+    if (startState != null ? !startState.equals(taskSpec.startState) : taskSpec.startState != null) return false;
+    if (!inProgressState.equals(taskSpec.inProgressState)) return false;
+    if (finishedState != null ? !finishedState.equals(taskSpec.finishedState) : taskSpec.finishedState != null)
+      return false;
+    return !(errorState != null ? !errorState.equals(taskSpec.errorState) : taskSpec.errorState != null);
+
+  }
+
+  @Override
+  public int hashCode() {
+    int result = startState != null ? startState.hashCode() : 0;
+    result = 31 * result + inProgressState.hashCode();
+    result = 31 * result + (finishedState != null ? finishedState.hashCode() : 0);
+    result = 31 * result + (errorState != null ? errorState.hashCode() : 0);
+    result = 31 * result + (int) (timeout ^ (timeout >>> 32));
+    result = 31 * result + (int) (retries ^ (retries >>> 32));
+    return result;
   }
 }

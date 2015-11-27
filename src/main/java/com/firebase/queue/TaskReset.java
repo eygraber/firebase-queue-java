@@ -19,21 +19,25 @@ import java.util.Map;
     void onResetFailed(String error, boolean canRetry);
   }
 
-  public TaskReset() {}
+  TaskReset() {}
 
-  public void onNewTaskSpec(final TaskSpec taskSpec) {
+  void onNewTaskSpec(final TaskSpec taskSpec) {
     this.taskSpec = taskSpec;
   }
 
-  public void reset(@NotNull final Firebase taskRef, @NotNull final String inProgressState) {
+  void reset(@NotNull final Firebase taskRef, @NotNull final String inProgressState) {
     reset(taskRef, null, inProgressState, null, 0);
   }
 
-  public void reset(@NotNull final Firebase taskRef, @NotNull String ownerId, @NotNull final String inProgressState) {
+  void reset(@NotNull final Firebase taskRef, @NotNull final String inProgressState, @NotNull Listener listener) {
+    reset(taskRef, null, inProgressState, listener, 0);
+  }
+
+  void reset(@NotNull final Firebase taskRef, @NotNull String ownerId, @NotNull final String inProgressState) {
     reset(taskRef, ownerId, inProgressState, null, 0);
   }
 
-  public void reset(@NotNull final Firebase taskRef, @NotNull String ownerId, @NotNull final String inProgressState, @NotNull Listener listener) {
+  void reset(@NotNull final Firebase taskRef, @NotNull String ownerId, @NotNull final String inProgressState, @NotNull Listener listener) {
     reset(taskRef, ownerId, inProgressState, listener, 0);
   }
 
@@ -78,12 +82,12 @@ import java.util.Map;
         if(error != null) {
           final long incrementedRetries = retries + 1;
           if(incrementedRetries < Queue.MAX_TRANSACTION_RETRIES) {
-            Log.log("Received error while resetting task " + taskKey + "...retrying", error);
+            Log.log(error, "Received error while resetting task " + taskKey + "...retrying");
             reset(taskRef, ownerId, inProgressState, listener, incrementedRetries);
           }
           else {
-            Log.log("Can't reset task " + taskKey + " - transaction errored too many times, no longer retrying", error);
-            if(listener != null) listener.onResetFailed("Can't reset task - transaction errored too many times, no longer retrying", true);
+            Log.log(error, "Can't reset task " + taskKey + " - transaction errored too many times, no longer retrying");
+            if(listener != null) listener.onResetFailed("Can't reset task - transaction errored too many times, no longer retrying - " + error, true);
           }
         }
         else {

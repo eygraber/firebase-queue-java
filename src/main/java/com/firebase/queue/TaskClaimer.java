@@ -11,6 +11,7 @@ import org.jetbrains.annotations.NotNull;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /*package*/ class TaskClaimer {
   private static final String[] SANITIZE_KEYS = new String[] { Task.STATE_KEY, Task.STATE_CHANGED_KEY, Task.OWNER_KEY, Task.ERROR_DETAILS_KEY };
@@ -27,10 +28,12 @@ import java.util.concurrent.CountDownLatch;
 
   private volatile boolean interrupted;
 
-  private boolean claimed;
+  private volatile boolean claiming;
+
+  private volatile boolean claimed;
   private final Object claimLock = new Object();
 
-  private boolean startedClaiming;
+  private AtomicBoolean startedClaiming = new AtomicBoolean();
 
   private long retries;
 
@@ -60,13 +63,9 @@ import java.util.concurrent.CountDownLatch;
   }
 
   public TaskGenerator claimTask() {
-    if(startedClaiming) {
+    if(startedClaiming.getAndSet(true)) {
       throw new IllegalStateException("Cannot claim a task more than once");
     }
-
-    Log.log("Attempting to claim task " + taskRef.getKey() + " on " + ownerId);
-
-    startedClaiming = true;
 
     return claimTaskInternal();
   }
@@ -78,19 +77,18 @@ import java.util.concurrent.CountDownLatch;
       @Override
       public Transaction.Result doTransaction(MutableData taskSnpashot) {
         if(interrupted) {
-          Log.debug("Claiming task " + taskRef.getKey() + " on " + ownerId + " was interrupted before we started the transaction");
           return Transaction.abort();
         }
 
         // if this task no longer exists
         if(taskSnpashot.getValue() == null) {
-          Log.debug("Tried claiming task " + taskRef.getKey() + " on " + ownerId + " after someone else removed it");
+          Log.debug("TaskClaimer: Can't claim task because someone else removed it (key=" + taskRef.getKey() + ", owner" + ownerId + ")");
           return Transaction.success(taskSnpashot);
         }
 
         // if the task is not in a format that we can understand
         if(!(taskSnpashot.getValue() instanceof Map)) {
-          Log.debug("Tried claiming task " + taskRef.getKey() + " on " + ownerId + " but it was malformed (" + taskSnpashot.getValue() + ")", Log.Level.WARN);
+          Log.debug(Log.Level.WARN, "TaskClaimer: Can't claim task because it was malformed (key=%s, owner=%s, task=%s)", taskRef.getKey(), ownerId, taskSnpashot.getValue());
 
           malformed = true;
           String error = "Task was malformed";
@@ -119,7 +117,7 @@ import java.util.concurrent.CountDownLatch;
           return Transaction.success(taskSnpashot);
         }
         else {
-          Log.debug("Tried claiming task " + taskRef.getKey() + " on " + ownerId + " but its _state (" + taskState + ") did not match our _start_state (" + ourStartState + ")");
+          Log.debug(Log.Level.WARN, "TaskClaimer: Can't claim task because its _state (" + taskState + ") did not match our _start_state (" + ourStartState + ") (key=" + taskRef.getKey() + ", owner=" + ownerId + ")");
           return Transaction.abort();
         }
       }
@@ -129,30 +127,23 @@ import java.util.concurrent.CountDownLatch;
         final String taskKey = snapshot.getKey();
         if(error != null) {
           if(interrupted) {
-            Log.debug("Claiming task " + taskKey + " on " + ownerId + " was interrupted during a transaction that errored", error);
             taskLatch.countDown();
           }
           else if(++retries < Queue.MAX_TRANSACTION_RETRIES) {
-            Log.debug("Received error while claiming task " + taskKey + " on " + ownerId + "...retrying", error);
+            Log.debug(error, "TaskClaimer: Received error while claiming task...retrying (key=" + taskKey + ", owner" + ownerId + ")");
             claimTaskInternal();
           }
           else {
-            Log.debug("Can't claim task " + taskKey + " on " + ownerId + " - transaction errored too many times, no longer retrying", error);
+            Log.debug(error, "TaskClaimer: Can't claim task because transaction errored too many times, no longer retrying (key=" + taskKey + ", owner=" + ownerId + ")");
             taskLatch.countDown();
           }
         }
         else if(committed && snapshot.exists()) { // we own the task
-          if(interrupted) {
-            // since we claimed this task, and we have to give it up because we were interrupted, we have to reset it so someone else can try claiming it
-            Log.debug("Claiming task " + taskKey + " on " + ownerId + " was interrupted during the transaction");
-            taskReset.reset(taskRef, ownerId, taskSpec.getInProgressState());
-            taskLatch.countDown();
-          }
-          else if(malformed) {
+          if(interrupted || malformed) {
             taskLatch.countDown();
           }
           else {
-            Log.debug("Claimed task " + taskKey + " on " + ownerId);
+            Log.debug("TaskClaimer: Claimed task (key=" + taskKey + ", owner=" + ownerId + ")");
 
             @SuppressWarnings("unchecked") Map<String, Object> value = snapshot.getValue(Map.class);
             if(sanitize) {
@@ -165,7 +156,7 @@ import java.util.concurrent.CountDownLatch;
               if(!interrupted) {
                 claimed = true;
 
-                taskGenerator = new TaskGenerator(snapshot.getRef(), value);
+                taskGenerator = getTaskGenerator(snapshot.getRef(), value);
               }
 
               taskLatch.countDown();
@@ -177,24 +168,36 @@ import java.util.concurrent.CountDownLatch;
           taskLatch.countDown();
         }
       }
-    });
+    }, false);
+
+    claiming = true;
 
     try {
       taskLatch.await();
     }
     catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+
       synchronized (claimLock) {
         if(!claimed) {
           interrupted = true;
-          Log.debug("Failed to claim task " + taskRef.getKey() + " on " + ownerId);
-          Log.debug("Interrupted while trying to claim a task (" + taskRef.getKey() + ") for " + ownerId);
-          Log.debug("Tried claiming task " + taskRef.getKey() + " on " + ownerId + " but we were interrupted");
-          return null;
         }
       }
+
+      Log.debug(e, "TaskClaimer: Interrupted while waiting for transaction to complete (key=" + taskRef.getKey() + ", owner= " + ownerId + ")");
+      taskReset.reset(taskRef, ownerId, taskSpec.getInProgressState());
+      return null;
     }
 
     return taskGenerator;
+  }
+
+  boolean isClaiming() {
+    return claiming;
+  }
+
+  TaskGenerator getTaskGenerator(Firebase taskRef, Map<String, Object> taskData) {
+    return new TaskGenerator(taskRef, taskData);
   }
 
 }

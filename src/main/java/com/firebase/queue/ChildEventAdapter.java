@@ -4,7 +4,7 @@ import com.firebase.client.ChildEventListener;
 import com.firebase.client.DataSnapshot;
 import com.firebase.client.FirebaseError;
 
-/*package*/ class ChildEventAdapter implements ChildEventListener {
+class ChildEventAdapter implements ChildEventListener {
   @Override
   public void onChildAdded(DataSnapshot dataSnapshot, String previousChildKey) {}
 
